@@ -1,0 +1,212 @@
+% Junyan Du
+% ssyjd9@nottingham.edu.cn
+
+%% PRELIMINARY TASK - ARDUINO AND GIT INSTALLATION [5 MARKS]
+clear; clc;
+% Create an Arduino object
+a = arduino('COM9', 'Uno'); 
+
+% Define the LED digital pin
+ledPin = 'D13';
+
+% Blink the LED 10 times with 0.5 second intervals
+for i = 1:10
+    writeDigitalPin(a, ledPin, 1);   % Turn LED on
+    pause(0.5);
+    writeDigitalPin(a, ledPin, 0);   % Turn LED off
+    pause(0.5);
+end
+
+%% TASK 1 - READ TEMPERATURE DATA, PLOT, AND WRITE TO A LOG FILE [20 MARKS]
+
+duration = 600;                     % Total acquisition time in seconds
+tempData = zeros(1, duration);      % Preallocate array for temperature values
+timeStamps = 0:1:duration-1;        % Time vector (seconds)
+
+% Sensor specifications (from MCP9700A datasheet)
+Tc = 0.01;      % Temperature coefficient (10 mV/°C)
+V0C = 0.500;    % Output voltage at 0°C
+
+% Read temperature every second (simulate with a loop)
+for t = 1:duration
+    voltage = readVoltage(a, 'A0');     % Read from analog pin A0
+    tempData(t) = (voltage - V0C) / Tc; % Convert voltage to temperature
+    pause(1);
+end
+
+% Calculate statistics
+minTemp = min(tempData);
+maxTemp = max(tempData);
+avgTemp = mean(tempData);
+
+% Plot temperature over time
+figure;
+plot(timeStamps, tempData);
+xlabel('Time (s)');
+ylabel('Temperature (°C)');
+title('Capsule Temperature Monitoring');
+saveas(gcf, 'temperature_plot.png'); % Save plot as image
+
+% Output formatted data to the command window and a text file
+fileID = fopen('capsule_temperature.txt', 'w');
+fprintf(fileID, 'Data logging initiated - %s\n', date);
+fprintf(fileID, 'Location - Nottingham\n');
+% Print minute-by-minute temperature (sampling every 60th second)
+for minute = 0:10
+    idx = minute * 60 + 1;
+    fprintf('Minute%d   Temperature   %.2f C\n', minute, tempData(idx));
+    fprintf(fileID, 'Minute%d   Temperature   %.2f C\n', minute, tempData(idx));
+end
+fprintf('Max temp                 %.2f C\n', maxTemp);
+fprintf('Min temp                 %.2f C\n', minTemp);
+fprintf('Average temp             %.2f C\n', avgTemp);
+fprintf('Data logging terminated\n');
+fclose(fileID);
+
+%% TASK 2 - LED TEMPERATURE MONITORING DEVICE IMPLEMENTATION [25 MARKS]
+
+function temp_monitor(a)
+% TEMP_MONITOR Continuously monitors temperature and controls LEDs.
+%   temp_monitor(a) reads temperature from analog pin A0,
+%   updates a live plot, and drives LEDs based on temperature range.
+%
+%   Green LED (D9) : 18-24°C (steady)
+%   Yellow LED (D10): <18°C (blink 0.5s interval)
+%   Red LED (D11)   : >24°C (blink 0.25s interval)
+
+% --- Pin definitions ---
+greenPin = 'D9';
+yellowPin = 'D10';
+redPin = 'D11';
+sensorPin = 'A0';
+
+% --- Sensor constants ---
+Tc = 0.01;   % V/°C
+V0C = 0.500; % V at 0°C
+
+% --- Plot setup ---
+figure;
+hLine = animatedline;
+xlabel('Time (s)');
+ylabel('Temperature (°C)');
+ylim([10 40]); % Adjust based on expected range
+startTime = tic;
+
+% --- Control loop ---
+while true
+    % Read and convert temperature
+    voltage = readVoltage(a, sensorPin);
+    temp = (voltage - V0C) / Tc;
+    
+    % Update live plot with current time
+    elapsed = toc(startTime);
+    addpoints(hLine, elapsed, temp);
+    xlim([max(0, elapsed-60) elapsed+10]); % Show last 60s window
+    drawnow;
+    
+    % LED logic
+    if temp >= 18 && temp <= 24
+        % Comfort range: steady green, others off
+        writeDigitalPin(a, greenPin, 1);
+        writeDigitalPin(a, yellowPin, 0);
+        writeDigitalPin(a, redPin, 0);
+    elseif temp < 18
+        % Below range: yellow blinks
+        writeDigitalPin(a, greenPin, 0);
+        writeDigitalPin(a, redPin, 0);
+        writeDigitalPin(a, yellowPin, 1);
+        pause(0.5);
+        writeDigitalPin(a, yellowPin, 0);
+        pause(0.5);
+    else % temp > 24
+        % Above range: red blinks faster
+        writeDigitalPin(a, greenPin, 0);
+        writeDigitalPin(a, yellowPin, 0);
+        writeDigitalPin(a, redPin, 1);
+        pause(0.25);
+        writeDigitalPin(a, redPin, 0);
+        pause(0.25);
+    end
+end
+end
+
+%% TASK 3 - ALGORITHMS – TEMPERATURE PREDICTION [30 MARKS]
+
+function temp_prediction(a)
+% TEMP_PREDICTION Predicts future temperature and alerts if changing too fast.
+%   temp_prediction(a) continuously reads temperature, computes rate of change,
+%   predicts the temperature in 5 minutes, and controls LEDs.
+%   Green: stable within comfort, Red: heating > +4°C/min, Yellow: cooling > -4°C/min.
+%   Stability means rate of change is within +/-4°C/min.
+
+% Pin definitions
+greenPin = 'D9';
+redPin = 'D11';
+yellowPin = 'D10';
+sensorPin = 'A0';
+
+Tc = 0.01;
+V0C = 0.500;
+
+% Store recent values to compute derivative smoothly
+historyLength = 10;
+tempHistory = zeros(1, historyLength);
+timeHistory = zeros(1, historyLength);
+
+% Initialize first reading
+voltage = readVoltage(a, sensorPin);
+tempHistory(1) = (voltage - V0C) / Tc;
+timeHistory(1) = 0;
+startTime = tic;
+
+while true
+    voltage = readVoltage(a, sensorPin);
+    currentTemp = (voltage - V0C) / Tc;
+    currentTime = toc(startTime);
+    
+    % Shift history and add new point
+    tempHistory = [tempHistory(2:end), currentTemp];
+    timeHistory = [timeHistory(2:end), currentTime];
+    
+    % Compute rate of change using linear fit (robust to noise)
+    if length(tempHistory) >= 2
+        p = polyfit(timeHistory, tempHistory, 1);
+        ratePerSec = p(1);          % °C per second
+        ratePerMin = ratePerSec * 60; % °C per minute
+    else
+        ratePerMin = 0;
+    end
+    
+    % Predict temperature in 5 minutes
+    predictedTemp = currentTemp + ratePerSec * 300; % 300 seconds
+    
+    % Print to screen
+    fprintf('Current: %.2f C, Rate: %.2f C/min, Predicted in 5 min: %.2f C\n', ...
+            currentTemp, ratePerMin, predictedTemp);
+    
+    % LED logic based on rate of change
+    if abs(ratePerMin) <= 4
+        % Stable within comfort range -> green
+        writeDigitalPin(a, greenPin, 1);
+        writeDigitalPin(a, redPin, 0);
+        writeDigitalPin(a, yellowPin, 0);
+    elseif ratePerMin > 4
+        % Heating too fast -> red
+        writeDigitalPin(a, greenPin, 0);
+        writeDigitalPin(a, redPin, 1);
+        writeDigitalPin(a, yellowPin, 0);
+    else % ratePerMin < -4
+        % Cooling too fast -> yellow
+        writeDigitalPin(a, greenPin, 0);
+        writeDigitalPin(a, redPin, 0);
+        writeDigitalPin(a, yellowPin, 1);
+    end
+    
+    pause(1); % Sampling interval ~1s
+end
+end
+
+
+%% TASK 4 - REFLECTIVE STATEMENT [5 MARKS]
+
+% this part have provided in the word document.
